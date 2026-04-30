@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>АПС | ПРОЕКТ 88.1</title>
+    <style>
+        :root {
+            --acad-bg: #121212;
+            --acad-grid: #222222;
+            --acad-axis: #0055ff;
+            --acad-line: #ffffff;
+            --acad-dim: #00ff00; 
+            --acad-sensor: #ff3333;
+            --panel-bg: #1e1e1e;
+            --text: #dcdcdc;
+        }
+
+        body {
+            margin: 0;
+            background: var(--acad-bg);
+            color: var(--text);
+            font-family: 'Consolas', 'Monaco', monospace;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #ui-panel {
+            width: 330px;
+            background: var(--panel-bg);
+            padding: 20px;
+            border-right: 1px solid #333;
+            z-index: 10;
+            overflow-y: auto;
+        }
+
+        .input-group { margin-bottom: 18px; }
+        label { display: block; margin-bottom: 8px; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
+        input, select {
+            width: 100%;
+            padding: 10px;
+            background: #000;
+            border: 1px solid #444;
+            color: var(--acad-dim);
+            border-radius: 2px;
+            box-sizing: border-box;
+            outline: none;
+            font-family: inherit;
+        }
+        input:focus, select:focus { border-color: var(--acad-axis); }
+
+        h2 { font-size: 16px; margin-bottom: 25px; color: #fff; border-left: 3px solid var(--acad-axis); padding-left: 10px; }
+
+        #viewport {
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-image: radial-gradient(var(--acad-grid) 1px, transparent 1px);
+            background-size: 30px 30px;
+        }
+
+        .info-box {
+            font-size: 12px;
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            border: 1px dashed #444;
+            line-height: 1.8;
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui-panel">
+    <h2>АПС ПО ГОСТ РК| ПРОЕКТ 88.1</h2>
+    
+    <div class="input-group">
+        <label>Длина стены X (мм)</label>
+        <input type="number" id="roomW" value="25000" step="1000">
+    </div>
+    
+    <div class="input-group">
+        <label>Ширина стены Y (мм)</label>
+        <input type="number" id="roomH" value="15000" step="1000">
+    </div>
+
+    <div class="input-group">
+        <label>Высота потолка (мм)</label>
+        <input type="number" id="ceilH" value="5000" step="500">
+    </div>
+
+    <div class="input-group">
+        <label>Тип извещателя (ГОСТ)</label>
+        <select id="sensorType">
+            <option value="smoke">Дымовой (Точечный)</option>
+            <option value="heat">Тепловой</option>
+            <option value="aspir">Аспирационный / Газовый</option>
+            <option value="linear" selected>Линейный (Лучевой)</option>
+            <option value="flame">Пламени (УФ/ИК)</option>
+        </select>
+    </div>
+
+    <div class="info-box" id="tech-info">
+        </div>
+</div>
+
+<div id="viewport">
+    <canvas id="acadCanvas"></canvas>
+</div>
+
+<script>
+    const canvas = document.getElementById('acadCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // База параметров с типами отрисовки (layout)
+    function getGostParams(type, height) {
+        const hm = height / 1000;
+        
+        if (['smoke', 'aspir'].includes(type)) {
+            let s = 8000, w = 4000;
+            if (hm <= 3.5) { s = 9000; w = 4500; }
+            else if (hm <= 6.0) { s = 8500; w = 4000; }
+            let lbl = type === 'smoke' ? "Дымовой точечный" : "Аспирационный/Газовый";
+            return { layout: 'grid', step: s, wall: w, label: lbl };
+        }
+        
+        if (type === 'heat') {
+            let s = 4000, w = 2000;
+            if (hm <= 3.5) { s = 5000; w = 2500; }
+            else if (hm <= 6.0) { s = 4500; w = 2000; }
+            return { layout: 'grid', step: s, wall: w, label: "Тепловой" };
+        }
+
+        if (type === 'linear') {
+            // Для лучевых датчиков важен шаг между лучами
+            return { layout: 'beam', step: 14000, wall: 7000, label: "Линейный (Лазерный)" };
+        }
+
+        if (type === 'flame') {
+            // Извещатели пламени считаются по радиусу обзора (условно 25 метров)
+            return { layout: 'radius', step: 20000, wall: 10000, radius: 25000, label: "Пламени" };
+        }
+    }
+
+    function calcLayout(total, maxStep, maxWall) {
+        let count = Math.ceil(total / maxStep);
+        if (count < 2) count = 2; // Минимум 2 по ГОСТ в любом случае
+
+        let dist = total / count;
+        let wallOffset = dist / 2;
+
+        while (wallOffset > maxWall) {
+            count++;
+            dist = total / count;
+            wallOffset = dist / 2;
+        }
+
+        let coords = [];
+        for (let i = 0; i < count; i++) {
+            coords.push(wallOffset + (dist * i));
+        }
+        return { coords, dist };
+    }
+
+    function updateLegend(params) {
+        const info = document.getElementById('tech-info');
+        let html = `<b>Тип:</b> ${params.label}<br><b>Норматив шага:</b> ${params.step} мм<br><hr style="border:0; border-top:1px solid #444; margin: 10px 0;">`;
+        
+        if (params.layout === 'grid') {
+            html += `<span style="color:var(--acad-axis)">──</span> Синие оси (Сетка)<br>
+                     <span style="color:var(--acad-sensor)">⊕</span> Датчик на пересечении`;
+        } else if (params.layout === 'beam') {
+            html += `<span style="color:var(--acad-sensor)">- -</span> Лазерный луч<br>
+                     <span style="color:var(--acad-sensor)">■</span> Блоки (Приемник/Излучатель)`;
+        } else if (params.layout === 'radius') {
+            html += `<span style="color:var(--acad-sensor)">●</span> Извещатель пламени<br>
+                     <span style="color:rgba(255,51,51,0.5)">⭕</span> Зона обзора (R=${params.radius/1000}м)`;
+        }
+        info.innerHTML = html;
+    }
+
+    function draw() {
+        const roomW = parseFloat(document.getElementById('roomW').value) || 0;
+        const roomH = parseFloat(document.getElementById('roomH').value) || 0;
+        const ceilH = parseFloat(document.getElementById('ceilH').value) || 0;
+        const type = document.getElementById('sensorType').value;
+        const params = getGostParams(type, ceilH);
+        
+        updateLegend(params);
+
+        canvas.width = window.innerWidth - 330;
+        canvas.height = window.innerHeight;
+
+        const scale = Math.min((canvas.width - 250) / roomW, (canvas.height - 250) / roomH);
+        const offsetX = (canvas.width - roomW * scale) / 2;
+        const offsetY = (canvas.height - roomH * scale) / 2;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // СТЕНЫ
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(offsetX, offsetY, roomW * scale, roomH * scale);
+
+        const xData = calcLayout(roomW, params.step, params.wall);
+        const yData = calcLayout(roomH, params.step, params.wall);
+
+        // --- ЛОГИКА 1: ТОЧЕЧНАЯ СЕТКА ---
+        if (params.layout === 'grid') {
+            ctx.setLineDash([15, 5, 2, 5]);
+            ctx.strokeStyle = '#0055ff';
+            ctx.lineWidth = 1;
+            xData.coords.forEach(x => {
+                ctx.beginPath(); ctx.moveTo(offsetX + x * scale, offsetY - 20); ctx.lineTo(offsetX + x * scale, offsetY + roomH * scale + 20); ctx.stroke();
+            });
+            yData.coords.forEach(y => {
+                ctx.beginPath(); ctx.moveTo(offsetX - 20, offsetY + y * scale); ctx.lineTo(offsetX + roomW * scale + 20, offsetY + y * scale); ctx.stroke();
+            });
+            ctx.setLineDash([]);
+
+            xData.coords.forEach((x, ix) => {
+                yData.coords.forEach((y, iy) => {
+                    const px = offsetX + x * scale; const py = offsetY + y * scale;
+                    ctx.strokeStyle = '#ff3333'; ctx.lineWidth = 2;
+                    ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI*2); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(px-10, py); ctx.lineTo(px+10, py); ctx.moveTo(px, py-10); ctx.lineTo(px, py+10); ctx.stroke();
+
+                    if (iy === 0) {
+                        const dY = offsetY - 50;
+                        if (ix === 0) drawDim(offsetX, dY, px, dY, Math.round(x));
+                        else drawDim(offsetX + xData.coords[ix-1] * scale, dY, px, dY, Math.round(xData.dist));
+                        if (ix === xData.coords.length - 1) drawDim(px, dY, offsetX + roomW * scale, dY, Math.round(roomW - x));
+                    }
+                    if (ix === 0) {
+                        const dX = offsetX - 50;
+                        if (iy === 0) drawDim(dX, offsetY, dX, py, Math.round(y));
+                        else drawDim(dX, offsetY + yData.coords[iy-1] * scale, dX, py, Math.round(yData.dist));
+                        if (iy === yData.coords.length - 1) drawDim(dX, py, dX, offsetY + roomH * scale, Math.round(roomH - y));
+                    }
+                });
+            });
+        }
+
+        // --- ЛОГИКА 2: ЛИНЕЙНЫЕ ЛУЧИ ---
+        if (params.layout === 'beam') {
+            const isHoriz = roomW >= roomH; // Лучи пускаем вдоль длинной стены
+            
+            if (isHoriz) {
+                yData.coords.forEach((y, iy) => {
+                    const py = offsetY + y * scale;
+                    
+                    // Луч
+                    ctx.setLineDash([15, 10]); ctx.strokeStyle = '#ff3333'; ctx.lineWidth = 2;
+                    ctx.beginPath(); ctx.moveTo(offsetX, py); ctx.lineTo(offsetX + roomW * scale, py); ctx.stroke(); ctx.setLineDash([]);
+                    
+                    // Блоки на стенах
+                    ctx.fillStyle = '#ff3333';
+                    ctx.fillRect(offsetX - 6, py - 6, 12, 12);
+                    ctx.fillRect(offsetX + roomW * scale - 6, py - 6, 12, 12);
+
+                    // Размеры (только по оси Y)
+                    const dX = offsetX - 50;
+                    if (iy === 0) drawDim(dX, offsetY, dX, py, Math.round(y));
+                    else drawDim(dX, offsetY + yData.coords[iy-1] * scale, dX, py, Math.round(yData.dist));
+                    if (iy === yData.coords.length - 1) drawDim(dX, py, dX, offsetY + roomH * scale, Math.round(roomH - y));
+                });
+            } else {
+                xData.coords.forEach((x, ix) => {
+                    const px = offsetX + x * scale;
+                    
+                    // Луч
+                    ctx.setLineDash([15, 10]); ctx.strokeStyle = '#ff3333'; ctx.lineWidth = 2;
+                    ctx.beginPath(); ctx.moveTo(px, offsetY); ctx.lineTo(px, offsetY + roomH * scale); ctx.stroke(); ctx.setLineDash([]);
+                    
+                    // Блоки
+                    ctx.fillStyle = '#ff3333';
+                    ctx.fillRect(px - 6, offsetY - 6, 12, 12);
+                    ctx.fillRect(px - 6, offsetY + roomH * scale - 6, 12, 12);
+
+                    // Размеры (только по оси X)
+                    const dY = offsetY - 50;
+                    if (ix === 0) drawDim(offsetX, dY, px, dY, Math.round(x));
+                    else drawDim(offsetX + xData.coords[ix-1] * scale, dY, px, dY, Math.round(xData.dist));
+                    if (ix === xData.coords.length - 1) drawDim(px, dY, offsetX + roomW * scale, dY, Math.round(roomW - x));
+                });
+            }
+        }
+
+        // --- ЛОГИКА 3: ДАТЧИКИ ПЛАМЕНИ (РАДИУС) ---
+        if (params.layout === 'radius') {
+            xData.coords.forEach((x, ix) => {
+                yData.coords.forEach((y, iy) => {
+                    const px = offsetX + x * scale; const py = offsetY + y * scale;
+                    
+                    // Зона покрытия (полупрозрачный круг)
+                    ctx.beginPath(); ctx.arc(px, py, params.radius * scale, 0, Math.PI*2);
+                    ctx.fillStyle = 'rgba(255, 51, 51, 0.08)'; ctx.fill();
+                    ctx.strokeStyle = 'rgba(255, 51, 51, 0.4)'; ctx.lineWidth = 1; ctx.stroke();
+
+                    // Сам датчик (Точка)
+                    ctx.fillStyle = '#ff3333';
+                    ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI*2); ctx.fill();
+
+                    // Размеры
+                    if (iy === 0) {
+                        const dY = offsetY - 50;
+                        if (ix === 0) drawDim(offsetX, dY, px, dY, Math.round(x));
+                        else drawDim(offsetX + xData.coords[ix-1] * scale, dY, px, dY, Math.round(xData.dist));
+                        if (ix === xData.coords.length - 1) drawDim(px, dY, offsetX + roomW * scale, dY, Math.round(roomW - x));
+                    }
+                    if (ix === 0) {
+                        const dX = offsetX - 50;
+                        if (iy === 0) drawDim(dX, offsetY, dX, py, Math.round(y));
+                        else drawDim(dX, offsetY + yData.coords[iy-1] * scale, dX, py, Math.round(yData.dist));
+                        if (iy === yData.coords.length - 1) drawDim(dX, py, dX, offsetY + roomH * scale, Math.round(roomH - y));
+                    }
+                });
+            });
+        }
+    }
+
+    function drawDim(x1, y1, x2, y2, value) {
+        if (value <= 10) return;
+        ctx.strokeStyle = '#00ff00';
+        ctx.fillStyle = '#00ff00';
+        ctx.lineWidth = 1;
+        ctx.font = "11px 'Consolas'";
+
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+
+        const s = 4;
+        ctx.beginPath();
+        ctx.moveTo(x1-s, y1+s); ctx.lineTo(x1+s, y1-s);
+        ctx.moveTo(x2-s, y2+s); ctx.lineTo(x2+s, y2-s);
+        ctx.stroke();
+
+        ctx.save();
+        ctx.translate((x1 + x2) / 2, (y1 + y2) / 2);
+        if (x1 === x2) ctx.rotate(-Math.PI/2);
+        ctx.textAlign = "center";
+        ctx.fillText(value, 0, -5);
+        ctx.restore();
+    }
+
+    document.querySelectorAll('input, select').forEach(el => el.addEventListener('input', draw));
+    window.addEventListener('resize', draw);
+    draw();
+</script>
+
+</body>
+</html>
